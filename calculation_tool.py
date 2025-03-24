@@ -413,6 +413,98 @@ def drug_titeration(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx):
     #plt.grid(True)
     plt.show()
 
+def sim_inhibit_pattern(adata,GPCR_adata_norm_df,GPCR_type_df,drug_list,drug_conc):
+    # 前提：以下の変数は既に定義されているものとする
+    # adata: シングルセル解析の AnnData オブジェクト（obs に "is_clz_selective" などが含まれる）
+    # GPCR_adata_norm_df: 正規化済み GPCR 発現データの DataFrame（行=細胞, 列=受容体名）
+    # GPCR_type_df: 受容体タイプの DataFrame（列: receptor_name, type）; type は "Gs", "Gi" 等
+    # drug_list: 薬剤名のリスト（例: ["drugA", "drugB", ...]）
+    # drug_conc: 薬剤濃度（scalar）
+    # ※ D_R_mtx は本コードでは使用せず、effective Ki 値によりシミュレーションする
+
+    # 1. adata.obs の "is_clz_selective" に基づき、グループ分けするためのマスクを作成
+    mask = adata.obs['is_clz_selective'] == True
+
+    # 2. GPCRのリストおよび GPCR_type_df のフィルタリング
+    GPCR_list2 = GPCR_adata_norm_df.columns
+    GPCR_type_df = GPCR_type_df[GPCR_type_df.receptor_name.isin(GPCR_list2)]
+    Gs = GPCR_type_df[GPCR_type_df.type == "Gs"]["receptor_name"].values
+    Gi = GPCR_type_df[GPCR_type_df.type == "Gi"]["receptor_name"].values
+
+    # 3. ランダムな受容体阻害パターンを 10,000 パターン生成
+    unique_patterns_set = set()
+    pattern_dict = {}
+    i = 0
+    while len(unique_patterns_set) < 10000:
+        random_pattern = np.random.randint(2, size=len(GPCR_list2))
+        pattern_str = ''.join(map(str, random_pattern))
+        if pattern_str not in unique_patterns_set:
+            unique_patterns_set.add(pattern_str)
+            # 各パターンは、受容体ごとに True (阻害する) / False (阻害しない) の辞書とする
+            pattern_dict[f"Pattern_{i+1}"] = {gpcr: bool(val) for gpcr, val in zip(GPCR_list2, random_pattern)}
+            i += 1
+
+    # オプション：最初の5パターンを確認
+    for key in list(pattern_dict.keys())[:5]:
+        print(f"{key}: {pattern_dict[key]}")
+
+    # 4. 全細胞の GPCR 発現データ（正規化済み）の DataFrame を用意
+    # ※ GPCR_adata_norm_df の index と adata.obs_names が整合している前提
+    all_expr = pd.DataFrame(GPCR_adata_norm_df, index=GPCR_adata_norm_df.index, columns=GPCR_list2)
+
+    # 5. 全細胞に対する cAMP 変化（cAMP modulation）をシミュレーションする関数の定義
+    def simulate_drug_response_all(expression_df, pattern, drug_list, drug_conc, Gs, Gi):
+        """
+        expression_df: 各細胞の受容体発現 (DataFrame, 行=細胞, 列=受容体)
+        pattern: 受容体阻害パターン（辞書, receptor -> bool, True=阻害する）
+        drug_list: 薬剤名のリスト
+        drug_conc: 薬剤濃度（scalar）
+        Gs, Gi: Gs, Gi タイプ受容体名の配列
+        """
+        # 阻害パターンに応じた effective Ki の設定
+        # 阻害する受容体は Ki = 0.01、阻害しない受容体は Ki = 10000
+        effective_Ki = pd.Series({receptor: (0.01 if pattern[receptor] else 10000)
+                                for receptor in expression_df.columns})
+        
+        responses = {}
+        for drug in drug_list:
+            # 各薬剤について、Gs 効果・Gi 効果を計算
+            gs_effect = (expression_df[Gs].divide(1 + drug_conc / effective_Ki[Gs])).sum(axis=1)
+            gi_effect = (expression_df[Gi].divide(1 + drug_conc / effective_Ki[Gi])).sum(axis=1)
+            basal_cAMP = (expression_df[Gs] - expression_df[Gi]).sum(axis=1)
+            cAMPmod = (gs_effect - gi_effect) - basal_cAMP
+            # 各薬剤の結果は、細胞ごとの cAMPmod の Series とする
+            responses[drug] = cAMPmod
+        return responses
+
+    # 6. 各阻害パターンについて、全細胞でシミュレーションした後、clz_selective と非選択細胞間の差分を算出
+    results = []
+    for pattern_name, pattern in pattern_dict.items():
+        # 全細胞でのシミュレーション結果を得る
+        all_responses = simulate_drug_response_all(all_expr, pattern, drug_list, drug_conc, Gs, Gi)
+        
+        diff = {}
+        for drug in drug_list:
+            # clz_selective 細胞群の平均 cAMPmod
+            selective_mean = all_responses[drug][mask].mean()
+            # 非選択細胞群の平均 cAMPmod
+            nonselective_mean = all_responses[drug][~mask].mean()
+            diff[drug] = selective_mean - nonselective_mean
+        # 複数薬剤の場合、ここでは平均差を評価指標とする
+        mean_diff = np.mean(list(diff.values()))
+        results.append({
+            'pattern': pattern_name,
+            'diff_per_drug': diff,
+            'mean_diff': mean_diff
+        })
+
+    # 7. 結果を DataFrame に変換し、mean_diff の大きい順にソート
+    results_df = pd.DataFrame(results)
+    results_df_sorted = results_df.sort_values(by='mean_diff', ascending=False)
+
+    # 上位のパターンを確認（例：上位5件）
+    print(results_df_sorted.head())
+
 """
 def preprocess_adata_in_batch(adata_path,max_cells):
     preprocess_start = time.time()
