@@ -375,7 +375,7 @@ def create_GPCR_pattern(n_pattern):
     pattern_df = pd.DataFrame.from_dict(pattern_dict, orient='index').reset_index(drop=True)
     return pattern_df
 
-def drug_titeration(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx,):
+def drug_titeration(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx):
     import bisect
     import matplotlib.pyplot as plt
     # べき指数が -3 から +5 までのリスト（必要に応じて変更）
