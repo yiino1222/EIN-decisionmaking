@@ -375,6 +375,43 @@ def create_GPCR_pattern(n_pattern):
     pattern_df = pd.DataFrame.from_dict(pattern_dict, orient='index').reset_index(drop=True)
     return pattern_df
 
+def drug_titeration(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx,):
+    import bisect
+    import matplotlib.pyplot as plt
+    # べき指数が -3 から +5 までのリスト（必要に応じて変更）
+    powers = [i for i in range(-3, 6)]
+    bisect.insort(powers, 0.2)
+    bisect.insort(powers, 0.35)
+    bisect.insort(powers, 0.5)
+    bisect.insort(powers, 0.75)
+    #bisect.insort(powers, 1.2)
+    bisect.insort(powers, 1.5)
+    bisect.insort(powers, 2.5)
+
+    # 10のべき乗の値をリストにする（薬剤濃度リスト）
+    drug_conc_list = [10**i for i in powers]
+
+    # 各濃度におけるクロザピン選択細胞数を格納するリスト
+    num_clz_list = []
+
+    for drug_conc in drug_conc_list:
+        print("Drug concentration:", drug_conc)
+        # 薬剤反応の計算（関数の実装に依存）
+        adata = calc_drug_response(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx, drug_conc)
+        # クロザピン選択細胞の計算（この関数は adata と num_clz_selective を返すと仮定）
+        adata, num_clz_selective = calc_clz_selective_cell(adata, drug_list, selectivity_threshold=1.5)
+        num_clz_list.append(num_clz_selective)
+
+    # プロット
+    plt.figure(figsize=(8, 6))
+    plt.plot(drug_conc_list, num_clz_list, marker='o', linestyle='-')
+    plt.xscale('log')  # x軸を対数スケールに設定
+    plt.xlabel("Drug Concentration (nM)")
+    plt.ylabel("Number of Clozapine Selective Cells")
+    plt.title("Clozapine Selectivity vs. Drug Concentration")
+    plt.ylim(bottom=0) 
+    #plt.grid(True)
+    plt.show()
 
 """
 def preprocess_adata_in_batch(adata_path,max_cells):
