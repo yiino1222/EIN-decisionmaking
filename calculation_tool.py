@@ -413,7 +413,7 @@ def drug_titeration(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx):
     #plt.grid(True)
     plt.show()
 
-def sim_inhibit_pattern(adata,GPCR_adata_norm_df,GPCR_type_df,drug_list,drug_conc):
+def sim_inhibit_pattern(adata,GPCR_adata_norm_df,GPCR_type_df,drug_list,drug_conc,n_pattern=10000):
     # 前提：以下の変数は既に定義されているものとする
     # adata: シングルセル解析の AnnData オブジェクト（obs に "is_clz_selective" などが含まれる）
     # GPCR_adata_norm_df: 正規化済み GPCR 発現データの DataFrame（行=細胞, 列=受容体名）
@@ -421,21 +421,24 @@ def sim_inhibit_pattern(adata,GPCR_adata_norm_df,GPCR_type_df,drug_list,drug_con
     # drug_list: 薬剤名のリスト（例: ["drugA", "drugB", ...]）
     # drug_conc: 薬剤濃度（scalar）
     # ※ D_R_mtx は本コードでは使用せず、effective Ki 値によりシミュレーションする
-
+    from tqdm import tqdm  # 追加：進捗バー用ライブラリ
     # 1. adata.obs の "is_clz_selective" に基づき、グループ分けするためのマスクを作成
     mask = adata.obs['is_clz_selective'] == True
 
     # 2. GPCRのリストおよび GPCR_type_df のフィルタリング
-    GPCR_list2 = GPCR_adata_norm_df.columns
-    GPCR_type_df = GPCR_type_df[GPCR_type_df.receptor_name.isin(GPCR_list2)]
+    # "Unnamed: 0" を除外したカラムリストを作成
+    GPCR_list2 = [col for col in GPCR_adata_norm_df.columns if col != "Unnamed: 0"]
+    #GPCR_type_df = GPCR_type_df[GPCR_type_df.receptor_name.isin(GPCR_list2)]
     Gs = GPCR_type_df[GPCR_type_df.type == "Gs"]["receptor_name"].values
     Gi = GPCR_type_df[GPCR_type_df.type == "Gi"]["receptor_name"].values
+    Gs_cols = [gene + '_raw' for gene in Gs]
+    Gi_cols = [gene + '_raw' for gene in Gi]
 
     # 3. ランダムな受容体阻害パターンを 10,000 パターン生成
     unique_patterns_set = set()
     pattern_dict = {}
     i = 0
-    while len(unique_patterns_set) < 10000:
+    while len(unique_patterns_set) < n_pattern:
         random_pattern = np.random.randint(2, size=len(GPCR_list2))
         pattern_str = ''.join(map(str, random_pattern))
         if pattern_str not in unique_patterns_set:
