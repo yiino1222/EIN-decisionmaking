@@ -69,8 +69,8 @@ def set_parameters_for_preprocess(GPCR_list):
     params['n_components'] = 50
     
     # Set Batched PCA parameters
-    params['pca_train_ratio'] = 0.05
-    params['n_pca_batches'] = 40
+    params['pca_train_ratio'] = 0.10
+    params['n_pca_batches'] = 30
     
     # Set t-SNE parameters
     params['tsne_n_pcs'] = 20
