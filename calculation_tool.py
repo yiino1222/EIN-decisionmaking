@@ -69,8 +69,8 @@ def set_parameters_for_preprocess(GPCR_list):
     params['n_components'] = 50
     
     # Set Batched PCA parameters
-    params['pca_train_ratio'] = 0.15
-    params['n_pca_batches'] = 40
+    params['pca_train_ratio'] = 0.2
+    params['n_pca_batches'] = 10
     
     # Set t-SNE parameters
     params['tsne_n_pcs'] = 20
@@ -89,7 +89,7 @@ def set_parameters_for_preprocess(GPCR_list):
     return params
 
 
-def preprocess_adata_in_bulk(adata_path,label=None,add_markers=None):
+def preprocess_adata_in_bulk(adata_path,label=None,add_markers=None,is_gpu=True):
     preprocess_start = time.time()
     D_R_mtx,GPCR_type_df,drug_list,GPCR_list=load_parameters()
     # Set parameters
@@ -232,7 +232,7 @@ def preprocess_adata_in_bulk(adata_path,label=None,add_markers=None):
     adata = utils.pca(adata, n_components=params["n_components"], 
                   train_ratio=params["pca_train_ratio"], 
                   n_batches=params["n_pca_batches"],
-                  gpu=True)
+                  gpu=is_gpu)
     
     #t-sne + k-means
     print("t-sne")
