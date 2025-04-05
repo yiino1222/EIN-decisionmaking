@@ -226,6 +226,7 @@ def regress_out(normalized, n_counts, percent_mito, batchsize = 100, verbose=Fal
                 # Instead of "return y - lr.predict(X), we write to outputs to maintain
                 # "F" ordering like in the else branch.
                 outputs[:,start_idx:stop_idx] =arr_batch - lr.predict(X)
+
     else:
         if normalized.shape[0] < 100000 and cp.sparse.issparse(normalized):
             normalized = normalized.todense()
