@@ -4,8 +4,6 @@ import anndata
 
 import time
 import os, wget
-
-import cupy as cp
 import cudf
 
 from cuml.decomposition import PCA
@@ -30,6 +28,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
+
 
 def load_parameters():
     D_R_mtx=pd.read_csv("/data/drug_receptor_mtx.csv",index_col=0)
@@ -87,7 +86,6 @@ def set_parameters_for_preprocess(GPCR_list):
     params['umap_spread'] = 1.0
     
     return params
-
 
 def preprocess_adata_in_bulk(adata_path,label=None,add_markers=None,is_gpu=True):
     preprocess_start = time.time()
@@ -260,6 +258,180 @@ def preprocess_adata_in_bulk(adata_path,label=None,add_markers=None,is_gpu=True)
   
     return adata,GPCR_df
 
+def preprocess_adata_in_batch(adata_path,max_cells):
+    import dask
+    from dask_cuda import initialize, LocalCUDACluster
+    from dask.distributed import Client, default_client
+    import rmm
+    import cupy as cp
+    from rmm.allocators.cupy import rmm_cupy_allocator
+
+    def set_mem():
+        rmm.reinitialize(managed_memory=True)
+        cp.cuda.set_allocator(rmm_cupy_allocator)
+
+    preprocess_start = time.time()
+    #Set `preprocessing_gpus` below to specify the GPUs to use for preprocessing. 
+    # For example, numbers 0-7 can be used on a machine with 8 gpus. Specifying a specific number,
+    #  such as 5, will use only the 6th GPU on the machine. In practice, 
+    # it's often a good idea to use GPUs 1-7 for pre-processing and GPU0 for downstream clustering, 
+    # visualization, and differential gene expression steps. 
+    preprocessing_gpus="1, 2, 3"
+    cluster = LocalCUDACluster(CUDA_VISIBLE_DEVICES=preprocessing_gpus)
+    client = Client(cluster)    
+
+    set_mem()
+    client.run(set_mem)
+    client
+    n_workers = len(client.scheduler_info()['workers'])
+    #load parameters
+    D_R_mtx,GPCR_type_df,drug_list,GPCR_list=load_parameters()
+    #set parameters
+    params=set_parameters_for_preprocess(GPCR_list)
+    
+    #preprocess in batch
+    print("preprocess_in_batches")
+
+    #Below, we load the sparse count matrix from the `.h5ad` file into GPU using a custom function. 
+    # While reading the dataset, filters are applied on the count matrix to remove cells with 
+    # an extreme number of genes expressed. Genes will zero expression in all cells are also eliminated. 
+
+    #The custom function uses [Dask](https://dask.org) to partition data. 
+    # The above mentioned filters are applied on individual partitions. 
+    # Usage of Dask along with cupy provides the following benefits:
+    #- Parallelized data loading when multiple GPUs are available
+    #- Ability to partition the data allows pre-processing large datasets
+
+    #Filters are applied on individual batches of cells. 
+    # Elementwise or cell-level normalization operations are also performed while reading. 
+    # For this example, the following two operations are performed:
+    #- Normalize the count matrix so that the total counts in each cell sum to 1e4.
+    #- Log transform the count matrix.
+
+    def partial_post_processor(partial_data):
+        partial_data = rapids_scanpy_funcs.normalize_total(partial_data, target_sum=1e4)
+        return partial_data.log1p()
+
+    dask_sparse_arr, genes, query = rapids_scanpy_funcs.read_with_filter(client,
+                                                        adata_path,
+                                                        min_genes_per_cell=params['min_genes_per_cell'],
+                                                        max_genes_per_cell=params['max_genes_per_cell'],
+                                                        partial_post_processor=partial_post_processor)
+    dask_sparse_arr = dask_sparse_arr.persist()
+    dask_sparse_arr.shape
+
+    # Select Most Variable Genes
+    markers=params['markers']
+    marker_genes_raw = {}
+    i = 0
+    for index in genes[genes.isin(markers)].index.to_arrow().to_pylist():
+        marker_genes_raw[markers[i]] = dask_sparse_arr[:, index].compute().toarray().ravel()
+        i += 1
+
+    #Filter the count matrix to retain only the most variable genes.
+    hvg = rapids_scanpy_funcs.highly_variable_genes_filter(client, dask_sparse_arr, genes, n_top_genes=n_top_genes)
+
+    genes = genes[hvg]
+    dask_sparse_arr = dask_sparse_arr[:, hvg]
+    sparse_gpu_array = dask_sparse_arr.compute()
+
+    del hvg
+
+    print("marker_genes_raw")
+    print(marker_genes_raw)
+    ## Regress out confounding factors (number of counts, mitochondrial gene expression)
+    # calculate the total counts and the percentage of mitochondrial counts for each cell
+    mito_genes = genes.str.startswith(params['MITO_GENE_PREFIX']).values
+
+    n_counts = sparse_gpu_array.sum(axis=1)
+    percent_mito = (sparse_gpu_array[:,mito_genes].sum(axis=1) / n_counts).ravel()
+
+    n_counts = cp.array(n_counts).ravel()
+    percent_mito = cp.array(percent_mito).ravel()
+    
+    # regression
+    print("perform regression")
+    n_rows = dask_sparse_arr.shape[0]
+    n_cols = dask_sparse_arr.shape[1]
+    cols_per_worker = int(n_cols / n_workers)
+    dask_sparse_arr = dask_sparse_arr.map_blocks(lambda x: x.todense(), dtype="float32", meta=cp.array(cp.zeros((0,)))).T
+    dask_sparse_arr = dask_sparse_arr.rechunk((cols_per_worker, n_rows)).persist()
+    dask_sparse_arr.compute_chunk_sizes()
+
+    import math
+    dask_sparse_arr = dask_sparse_arr.map_blocks(lambda x: rapids_scanpy_funcs.regress_out(x.T, n_counts, percent_mito).T, dtype="float32", meta=cp.array(cp.zeros(0,))).T
+    dask_sparse_arr = dask_sparse_arr.rechunk((math.ceil(n_rows/n_workers), n_cols)).persist()
+    dask_sparse_arr.compute_chunk_sizes()
+
+    # scale
+    print("perform scale")
+    mean = dask_sparse_arr.mean(axis=0)
+    dask_sparse_arr -= mean
+    stddev = cp.sqrt(dask_sparse_arr.var(axis=0).compute())
+    dask_sparse_arr /= stddev
+    dask_sparse_arr = dask.array.clip(dask_sparse_arr, -10, 10).persist()
+    del mean, stddev
+    
+    preprocess_time = time.time()
+    print("Total Preprocessing time: %s" % (preprocess_time-preprocess_start))
+    
+    ## Cluster and visualize
+    adata = anndata.AnnData(sparse_gpu_array.get())
+    adata.var_names = genes.to_pandas()
+    del sparse_gpu_array, genes
+    print(f"shape of adata: {adata.X.shape}")
+    
+    GPCR_df=pd.DataFrame()
+    for name, data in marker_genes_raw.items():
+        print(len(adata.obs[name]))
+        print(len(data.get()))
+        adata.obs[name] = data.get()
+        if   name[:-4] in GPCR_list:
+            GPCR_df[name]=data.get()
+        
+    # Deminsionality reduction
+    #We use PCA to reduce the dimensionality of the matrix to its top 50 principal components.
+    from cuml.dask.decomposition import PCA
+    pca_data = PCA(n_components=50).fit_transform(dask_sparse_arr)
+    pca_data.compute_chunk_sizes()
+
+    #We store the preprocessed count matrix as an AnnData object, 
+    # which is currently in host memory. We also add the expression levels of 
+    # the marker genes as observations to the annData object.
+    local_pca = pca_data.compute()
+    X = dask_sparse_arr.compute().get()
+
+    adata = anndata.AnnData(X=X)
+    adata.var_names = genes.to_numpy()
+    adata.obsm["X_pca"] = local_pca.get()
+
+    del pca_data
+    del dask_sparse_arr
+    
+    #UMAP + Graph clustering
+    print("UMAP")
+    adata=UMAP_adata(adata,params["n_neighbors"],params["knn_n_pcs"],
+                     params["umap_min_dist"],params["umap_spread"])
+   
+    #calculate response to antipsychotics
+    print("calc drug response")
+    default_drug_conc=100
+    adata=calc_drug_response(adata,GPCR_df,GPCR_type_df,drug_list,D_R_mtx,default_drug_conc)
+    
+    #calculate clz selectivity
+    selectivity_threshold=1.2
+    adata,num_clz_selective_cells=calc_clz_selective_cell(adata,drug_list,selectivity_threshold)
+    
+    #save preprocessed adata 
+    file_root, file_extension = os.path.splitext(adata_path)
+    # Append '_processed' to the root and add the extension back
+    processed_file_path = f"{file_root}_processed{file_extension}"
+    adata.write(processed_file_path)
+    client.shutdown()
+    cluster.close()
+    
+    return adata,GPCR_df
+
 def tsne_kmeans(adata,tsne_n_pcs,k):
     adata.obsm['X_tsne'] = TSNE().fit_transform(adata.obsm["X_pca"][:,:tsne_n_pcs])
     kmeans = KMeans(n_clusters=k, init="k-means++", random_state=0).fit(adata.obsm['X_pca'])
@@ -313,8 +485,6 @@ def calc_drug_response(adata,GPCR_df,GPCR_type_df,drug_list,D_R_mtx,drug_conc):
         #adata.obs['Ca_%s'%drug]=Ca_df[drug]
         
     return adata
-
-
 
 def calc_clz_selective_cell(adata,drug_list,selectivity_threshold):
     adata.obs["is_clz_activated"]=np.zeros(len(adata.obs))
@@ -657,138 +827,3 @@ def visualize_patterns(results_df_sorted, top_n=None, top_n_for_heatmap=None, sc
     
     plt.tight_layout()
     plt.show()
-
-"""
-def preprocess_adata_in_batch(adata_path,max_cells):
-    preprocess_start = time.time()
-    D_R_mtx,GPCR_type_df,drug_list,GPCR_list=load_parameters()
-    #set parameters
-    params=set_parameters_for_preprocess(GPCR_list)
-    
-    #preprocess in batch
-    print("preprocess_in_batches")
-    sparse_gpu_array, genes, marker_genes_raw = \
-    rapids_scanpy_funcs.preprocess_in_batches(adata_path, 
-                                              params['markers'], 
-                                              min_genes_per_cell=params['min_genes_per_cell'], 
-                                              max_genes_per_cell=params['max_genes_per_cell'], 
-                                              min_cells_per_gene=params['min_cells_per_gene'], 
-                                              target_sum=1e4, 
-                                              n_top_genes=params['n_top_genes'],
-                                              max_cells=max_cells)#params["USE_FIRST_N_CELLS"]
-    
-    print("marker_genes_raw")
-    print(marker_genes_raw)
-    ## Regress out confounding factors (number of counts, mitochondrial gene expression)
-    # calculate the total counts and the percentage of mitochondrial counts for each cell
-    mito_genes = genes.str.startswith(params['MITO_GENE_PREFIX'])
-
-    n_counts = sparse_gpu_array.sum(axis=1)
-    percent_mito = (sparse_gpu_array[:,mito_genes].sum(axis=1) / n_counts).ravel()
-
-    n_counts = cp.array(n_counts).ravel()
-    percent_mito = cp.array(percent_mito).ravel()
-    
-    # regression
-    print("perform regression")
-    sparse_gpu_array = rapids_scanpy_funcs.regress_out(sparse_gpu_array.tocsc(), n_counts, percent_mito)
-    del n_counts, percent_mito, mito_genes
-    
-    # scale
-    print("perform scale")
-    mean = sparse_gpu_array.mean(axis=0)
-    sparse_gpu_array -= mean
-    stddev = cp.sqrt(sparse_gpu_array.var(axis=0))
-    sparse_gpu_array /= stddev
-    sparse_gpu_array = sparse_gpu_array.clip(None,10)
-    del mean, stddev
-    
-    preprocess_time = time.time()
-    print("Total Preprocessing time: %s" % (preprocess_time-preprocess_start))
-    
-    ## Cluster and visualize
-    adata = anndata.AnnData(sparse_gpu_array.get())
-    adata.var_names = genes.to_pandas()
-    del sparse_gpu_array, genes
-    print(f"shape of adata: {adata.X.shape}")
-    
-    GPCR_df=pd.DataFrame()
-    for name, data in marker_genes_raw.items():
-        print(len(adata.obs[name]))
-        print(len(data.get()))
-        adata.obs[name] = data.get()
-        if   name[:-4] in GPCR_list:
-            GPCR_df[name]=data.get()
-        
-    # Deminsionality reduction
-    #We use PCA to reduce the dimensionality of the matrix to its top 50 principal components.
-    #If the number of cells was smaller, we would use the command 
-    # `adata.obsm["X_pca"] = cuml.decomposition.PCA(n_components=n_components, output_type="numpy").fit_transform(adata.X)` 
-    # to perform PCA on all the cells.
-    #However, we cannot perform PCA on the complete dataset using a single GPU. 
-    # Therefore, we use the batched PCA function in `utils.py`, which uses only a fraction 
-    # of the total cells to train PCA.
-    adata = utils.pca(adata, n_components=params["n_components"], 
-                  train_ratio=params["pca_train_ratio"], 
-                  n_batches=params["n_pca_batches"],
-                  gpu=True)
-    
-    #t-sne + k-means
-    adata.obsm['X_tsne'] = TSNE().fit_transform(adata.obsm["X_pca"][:,:params['tsne_n_pcs']])
-    kmeans = KMeans(n_clusters=params['k'], init="k-means++", random_state=0).fit(adata.obsm['X_pca'])
-    adata.obs['kmeans'] = kmeans.labels_.astype(str)        
-    sc.pl.tsne(adata, color=["kmeans"])
-    #sc.pl.tsne(adata, color=["SNAP25_raw"], color_map="Blues", vmax=1, vmin=-0.05)
-    
-    #UMAP + Graph clustering
-    sc.pp.neighbors(adata, n_neighbors=params["n_neighbors"], n_pcs=params["knn_n_pcs"],
-                    method='rapids')
-    sc.tl.umap(adata, min_dist=params["umap_min_dist"], spread=params["umap_spread"],
-               method='rapids')
-    sc.tl.louvain(adata, flavor='rapids')
-    sc.pl.umap(adata, color=["louvain"])
-    adata.obs['leiden'] = rapids_scanpy_funcs.leiden(adata)
-    sc.pl.umap(adata, color=["leiden"])
-    #sc.pl.umap(adata, color=["SNAP25_raw"], color_map="Blues", vmax=1, vmin=-0.05)
-    
-    #calculate response to antipsychotics
-    #noramlize GPCR expression levels
-    GPCR_adata=anndata.AnnData(X=GPCR_df)
-    GPCR_adata_norm=sc.pp.normalize_total(GPCR_adata,target_sum=1e4,inplace=False)['X']
-    GPCR_adata_norm_df=pd.DataFrame(GPCR_adata_norm,columns=GPCR_adata.var.index)
-    norm_df=pd.DataFrame(GPCR_adata_norm)
-    norm_col=[str[:-4] for str in GPCR_df.columns]
-    norm_df.columns=norm_col
-    
-    GPCR_type_df=GPCR_type_df[GPCR_type_df.receptor_name.isin(norm_col)]
-    
-    Gs=GPCR_type_df[GPCR_type_df.type=="Gs"]["receptor_name"].values
-    Gi=GPCR_type_df[GPCR_type_df.type=="Gi"]["receptor_name"].values
-    #Gq=GPCR_type_df[GPCR_type_df.type=="Gq"]["receptor_name"].values
-    
-    cAMP_df=pd.DataFrame(columns=drug_list)
-    #Ca_df=pd.DataFrame(columns=drug_list)
-    for drug in drug_list:
-        Gs_effect=(norm_df.loc[:,Gs]/D_R_mtx.loc[drug,Gs]).sum(axis=1) #TODO ki値で割り算するときにlog換算すべきか
-        Gi_effect=(norm_df.loc[:,Gi]/D_R_mtx.loc[drug,Gi]).sum(axis=1)
-        #Gq_effect=(norm_df.loc[:,Gq]/D_R_mtx.loc[drug,Gq]).sum(axis=1)
-        cAMPmod=Gi_effect-Gs_effect #Giの阻害→cAMP上昇、Gsの阻害→cAMP低下
-        Camod=-Gq_effect #Gq阻害→Ca低下
-        cAMP_df[drug]=cAMPmod
-        Ca_df[drug]=Camod
-        
-    cAMP_df.index=adata.obs_names
-    #Ca_df.index=adata.obs_names
-    #Ca_df=Ca_df+10**(-4)
-    for drug in drug_list:
-        adata.obs['cAMP_%s'%drug]=cAMP_df[drug]
-        #adata.obs['Ca_%s'%drug]=Ca_df[drug]
-    
-    #save preprocessed adata 
-    file_root, file_extension = os.path.splitext(adata_path)
-    # Append '_processed' to the root and add the extension back
-    processed_file_path = f"{file_root}_processed{file_extension}"
-    adata.write(processed_file_path)
-    
-    return adata
-"""

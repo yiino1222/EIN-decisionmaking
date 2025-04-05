@@ -654,7 +654,9 @@ def read_with_filter(client,
     with h5py.File(sample_file, 'r') as h5f:
         # Compute the number of cells to read
         indptr = h5f[_indprt]
-        genes = cudf.Series(h5f[_genes], dtype=cp.dtype('object'))
+        genes_pd = pd.Series(np.array(h5f[_genes]).astype(str))
+        genes = cudf.Series(genes_pd)
+        #genes = cudf.Series(h5f[_genes], dtype=cp.dtype('object'))
 
         total_cols = genes.shape[0]
         max_cells = indptr.shape[0] - 1
