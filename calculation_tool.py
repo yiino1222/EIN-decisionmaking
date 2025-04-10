@@ -61,7 +61,7 @@ def set_parameters_for_preprocess(GPCR_list):
     params['max_genes_per_cell'] = 6000
     
     # Set gene filtering parameters
-    params['min_cells_per_gene'] = 10
+    params['min_cells_per_gene'] = 1
     params['n_top_genes'] = 4000
     
     # Set PCA parameters
