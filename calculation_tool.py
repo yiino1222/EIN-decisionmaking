@@ -591,31 +591,6 @@ def drug_titeration(adata, GPCR_df, GPCR_type_df, drug_list, D_R_mtx):
     #plt.grid(True)
     plt.show()
 
-
-def create_inhibition_patterns(GPCR_list, n_inhibited=3, show_progress=True):
-    """
-    GPCR_list: 受容体名のリスト（例："Unnamed: 0" 除外済み）
-    n_inhibited: 阻害する受容体の数。例：3
-    show_progress: 進捗バーを表示するか否かのフラグ
-
-    Returns
-    -------
-    pattern_dict : dict
-        各パターンを { "Pattern_i": {受容体名: 阻害フラグ (bool)} } の形式で格納した辞書
-    """
-    pattern_dict = {}
-    all_combinations = list(itertools.combinations(GPCR_list, n_inhibited))
-    # 進捗バーの表示
-    if show_progress:
-        progress = tqdm(all_combinations, desc="Generating inhibition patterns")
-    else:
-        progress = all_combinations
-    for i, inhibited_receptors in enumerate(progress):
-        # inhibited_receptors に含まれる受容体のみ True、それ以外は False とする
-        pattern = {gpcr: (gpcr in inhibited_receptors) for gpcr in GPCR_list}
-        pattern_dict[f"Pattern_{i+1}"] = pattern
-    return pattern_dict
-
 def sim_inhibit_pattern(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc, 
                           group_col="is_clz_selective", selected_label=True, n_pattern=10000):
     """
@@ -751,7 +726,7 @@ def create_inhibition_patterns(GPCR_list, n_inhibited=3, show_progress=True):
         pattern_dict[f"Pattern_{i+1}"] = pattern
     return pattern_dict
 
-def sim_inhibit_pattern_3r(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc):
+def sim_inhibit_pattern_3r(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc,group_col="is_clz_selective", selected_label=True,n_inhibited=3):
     # 前提：以下の変数は既に定義されているものとする
     # adata: シングルセル解析の AnnData オブジェクト（obs に "is_clz_selective" などが含まれる）
     # GPCR_adata_norm_df: 正規化済み GPCR 発現データの DataFrame（行=細胞, 列=受容体名）
@@ -760,9 +735,9 @@ def sim_inhibit_pattern_3r(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc):
     
  # 進捗バー用ライブラリ
 
-    # 1. adata.obs の "is_clz_selective" に基づき、グループ分けするためのマスクを作成
-    mask = adata.obs['is_clz_selective'].astype(bool) == True
-    mask.index = pd.RangeIndex(start=0, stop=adata.obs['is_clz_selective'].shape[0], step=1)
+    # 1. adata.obs の group_col に基づき、グループ分けするためのマスクを作成
+    mask = adata.obs[group_col] == selected_label
+    mask.index = pd.RangeIndex(start=0, stop=adata.obs[group_col].shape[0], step=1)
     
     # 2. GPCR のリストおよび GPCR_type_df のフィルタリング
     # "Unnamed: 0" を除外したカラムリストを作成
@@ -782,14 +757,8 @@ def sim_inhibit_pattern_3r(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc):
     Gs_cols = [gene + '_raw' for gene in Gs_filtered]
     Gi_cols = [gene + '_raw' for gene in Gi_filtered]
 
-    # 3. GPCR_list2 の中から3つの受容体だけを阻害するパターンを全パターン生成
-    # itertools.combinations を用いて、全ての組み合わせを列挙する
-    pattern_dict = {}
-    all_combinations = list(itertools.combinations(GPCR_list2, 3))
-    for i, inhibited_receptors in enumerate(tqdm(all_combinations, desc="Generating inhibition patterns")):
-        # inhibited_receptors に含まれる受容体のみ True、それ以外 False とする
-        pattern = {gpcr: (gpcr in inhibited_receptors) for gpcr in GPCR_list2}
-        pattern_dict[f"Pattern_{i+1}"] = pattern
+    #  阻害パターンの生成（外部関数 create_inhibition_patterns を使用）
+    pattern_dict = create_inhibition_patterns(GPCR_list2, n_inhibited=n_inhibited, show_progress=True)
 
     # オプション：最初の5パターンを確認
     for key in list(pattern_dict.keys())[:5]:
