@@ -43,10 +43,10 @@ def load_parameters():
     "HRH1","HRH2","HRH3","CHRM1","CHRM2","CHRM3","CHRM4","CHRM5",
     "ADRA1A","ADRA1B","ADRA2A","ADRA2B","ADRA2C","ADRB1","ADRB2"]
     D_R_mtx.columns=GPCR_list
-    GPCR_list=["HTR1A","HTR1B","HTR1D","HTR1E","HTR2A","HTR2B","HTR2C",
-    "HTR3A","HTR4","HTR5A","HTR6","HTR7","DRD1","DRD2","DRD3","DRD4","DRD5",
-    "HRH1","HRH2","HRH3","CHRM1","CHRM2","CHRM3","CHRM4","CHRM5",
-    "ADRA1A","ADRA1B","ADRA2A","ADRA2B","ADRA2C","ADRB1","ADRB2","ADORA1","ADORA2A","ADORA2B","ADORA3"]
+    #GPCR_list=["HTR1A","HTR1B","HTR1D","HTR1E","HTR2A","HTR2B","HTR2C",
+    #"HTR3A","HTR4","HTR5A","HTR6","HTR7","DRD1","DRD2","DRD3","DRD4","DRD5",
+    #"HRH1","HRH2","HRH3","CHRM1","CHRM2","CHRM3","CHRM4","CHRM5",
+    #"ADRA1A","ADRA1B","ADRA2A","ADRA2B","ADRA2C","ADRB1","ADRB2","ADORA1","ADORA2A","ADORA2B","ADORA3"]
    
     return D_R_mtx,GPCR_type_df,drug_list,GPCR_list
 
@@ -707,6 +707,20 @@ def sim_inhibit_pattern(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc,
 
     return results_df_sorted, all_responses
 
+def create_random_inhibition_patterns(GPCR_list, n_pattern=10000):
+    unique_patterns_set = set()
+    pattern_dict = {}
+    i = 0
+    while len(unique_patterns_set) < n_pattern:
+        random_pattern = np.random.randint(2, size=len(GPCR_list))
+        pattern_str = ''.join(map(str, random_pattern))
+        if pattern_str not in unique_patterns_set:
+            unique_patterns_set.add(pattern_str)
+            # 各パターンは、受容体ごとに True (阻害する) / False (阻害しない) の辞書とする
+            pattern_dict[f"Pattern_{i+1}"] = {gpcr: bool(val) for gpcr, val in zip(GPCR_list, random_pattern)}
+            i += 1
+
+    return pattern_dict
 def create_inhibition_patterns(GPCR_list, n_inhibited=3, show_progress=True):
     """
     GPCR_list: 受容体名のリスト（例："Unnamed: 0" 除外済み）
@@ -763,7 +777,10 @@ def sim_inhibit_pattern_3r(adata, GPCR_adata_norm_df, GPCR_type_df, drug_conc,gr
     Gi_cols = [gene + '_raw' for gene in Gi_filtered]
 
     #  阻害パターンの生成（外部関数 create_inhibition_patterns を使用）
-    pattern_dict = create_inhibition_patterns(GPCR_list2, n_inhibited=n_inhibited, show_progress=True)
+    if n_inhibited==0:
+        pattern_dict = create_random_inhibition_patterns(GPCR_list2,n_pattern=10000)
+    else:
+        pattern_dict = create_inhibition_patterns(GPCR_list2, n_inhibited=n_inhibited, show_progress=True)
 
     # オプション：最初の5パターンを確認
     for key in list(pattern_dict.keys())[:5]:
