@@ -43,6 +43,11 @@ def load_parameters():
     "HRH1","HRH2","HRH3","CHRM1","CHRM2","CHRM3","CHRM4","CHRM5",
     "ADRA1A","ADRA1B","ADRA2A","ADRA2B","ADRA2C","ADRB1","ADRB2"]
     D_R_mtx.columns=GPCR_list
+    GPCR_list=["HTR1A","HTR1B","HTR1D","HTR1E","HTR2A","HTR2B","HTR2C",
+    "HTR3A","HTR4","HTR5A","HTR6","HTR7","DRD1","DRD2","DRD3","DRD4","DRD5",
+    "HRH1","HRH2","HRH3","CHRM1","CHRM2","CHRM3","CHRM4","CHRM5",
+    "ADRA1A","ADRA1B","ADRA2A","ADRA2B","ADRA2C","ADRB1","ADRB2","ADORA1","ADORA2A","ADORA2B","ADORA3"]
+   
     return D_R_mtx,GPCR_type_df,drug_list,GPCR_list
 
 def set_parameters_for_preprocess(GPCR_list):
